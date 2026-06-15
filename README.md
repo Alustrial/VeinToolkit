@@ -79,6 +79,12 @@ API, the engine toolkit, and how to add a new content type.
 - **Can I make new items / guns?** Not in v1. v1 is recipes (combining existing items). New item
   types are a future version.
 
+## Source / rebuilding
+This repo ships the prebuilt runtime so you can just *use* it. The DLL is compiled from the VEIN
+UE4SS fork — **https://github.com/Alustrial/UE4SS-Vein** — which is the engine base (UE4SS + VEIN
+signatures + stability patches). You only need that repo if you want to **rebuild or extend the
+DLL itself**; the recipe framework (Lua) is right here in `runtime/.../VeinCF/` and `src/`.
+
 ## Credits & license
 Vein Toolkit is **MIT licensed** — see **[LICENSE](LICENSE)**. Built on **RE-UE4SS** (MIT) with
 the original VEIN port by **xmathayus**; full credits and third-party license text in

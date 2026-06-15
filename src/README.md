@@ -9,8 +9,8 @@ functions the recipe framework calls (registry merge, native resolution, reflect
 `RegisterPreloadedAsset`, etc.).
 
 **To build the DLL:**
-1. Get the working VEIN RE-UE4SS fork — **`<our fork repo URL — TBD>`**. (Note: the original
-   xmathayus VEIN port is broken/unmaintained; this fork is the working base.)
+1. Get the working VEIN RE-UE4SS fork — **https://github.com/Alustrial/UE4SS-Vein**. (This is the
+   engine base the runtime DLL is compiled from; the original xmathayus VEIN port is unmaintained.)
 2. Drop this `LuaMod.cpp` in at `UE4SS/src/Mod/LuaMod.cpp`.
 3. Build (`build_veincf.bat`, or `cmake --build ... --target UE4SS`).
 4. The output `UE4SS.dll` is what ships in `runtime/`.
