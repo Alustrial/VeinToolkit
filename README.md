@@ -80,5 +80,6 @@ API, the engine toolkit, and how to add a new content type.
   types are a future version.
 
 ## Credits & license
-Built on **RE-UE4SS** (MIT) and **xmathayus's** VEIN port. Full credits and license text in
+Vein Toolkit is **MIT licensed** — see **[LICENSE](LICENSE)**. Built on **RE-UE4SS** (MIT) with
+the original VEIN port by **xmathayus**; full credits and third-party license text in
 **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)**. Vein Toolkit by **Alustrial**.
