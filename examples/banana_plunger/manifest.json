@@ -1,0 +1,25 @@
+{
+  "manifest_version": 1,
+  "id": "banana_plunger",
+  "name": "Banana Plunger Pack",
+  "version": "1.0.0",
+  "author": "Alustrial",
+  "description": "A craftable Banana Plunger - proves the manifest-only modder workflow (no Lua).",
+  "requires": { "veincf": ">=0.1.0" },
+  "paks": ["zzz_Banana_Plunger_P.pak"],
+  "recipes": [
+    {
+      "asset": "/Game/Vein/New/Banana_Plunger",
+      "registry_bin": "AssetRegistry.bin",
+      "makes": ["/Game/Vein/Items/Weapons/Melee/BP_Melee_Plunger"],
+      "needs": [
+        "/Game/Vein/Items/Consumables/Fruit_Veggies/BP_Banana",
+        "/Game/Vein/Items/Crafting/BP_Nail"
+      ],
+      "tab": "Weapons",
+      "bench": "Standard"
+    }
+  ],
+  "tags": ["recipe", "weapon"]
+}
+

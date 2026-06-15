@@ -1,0 +1,1 @@
+Drop your recipe mod folders here (see docs/MAKING_RECIPES.md and examples/banana_plunger).

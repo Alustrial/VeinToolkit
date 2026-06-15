@@ -1,0 +1,6 @@
+*.log
+*.dmp
+*.bak
+imgui.ini
+out/
+
