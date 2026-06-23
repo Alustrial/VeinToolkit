@@ -656,9 +656,82 @@ local function _recipe_assetmap_num(amAddr)
     end
 end
 
--- Additively merge a cooked AssetRegistry.bin (no shadow) + scan so the AssetManager indexes
--- our recipe. Resolves AppendState (ar+0x28 vtable +0x3F0) and LoadFromDisk (FindCallersOf the
--- registry loader's Load call -> the file-opener fingerprint). Returns ok, err.
+-- Recipe FPrimaryAssetTypeData* (the per-type struct holding the AssetMap at +0x178).
+local function _recipe_typedata(amAddr)
+    local dataPtr = _num(_rdu64(amAddr + 0x470)); local arrNum = _rd32(amAddr + 0x478)
+    if not dataPtr or not arrNum then return nil end
+    for i = 0, math.min(arrNum, 4096) - 1 do
+        local elem = dataPtr + i * 0x20
+        local valPtr = _num(_rdu64(elem + 0x08))
+        if valPtr and valPtr > 0x10000 then
+            local nm = "?"; pcall(function() nm = ReadFNameAt(hexn(elem)) or "?" end)
+            if nm == "Recipe" then return valPtr end
+        end
+    end
+end
+
+-- ★ DURABLE registration (post-0.024): write straight into the Recipe AssetMap's TSet via the DLL
+-- RegisterRecipeDirect — clone a real entry, swap identity, hash-link via engine GetTypeHash. No
+-- .bin, no LoadFromDisk, no inserter funnel (all of which the hotfix broke/stripped). Depends only
+-- on stable struct offsets + TSet layout. Idempotent + self-validating (refuses on hash mismatch).
+local function direct_register(n, mod_id)
+    if type(RegisterRecipeDirect) ~= "function" then return false, "RegisterRecipeDirect missing (rebuild DLL)" end
+    local am = (FindAllOf("VeinAssetManager") or {})[1]; if not am then return false, "no VeinAssetManager" end
+    local vp = _recipe_typedata(am:GetAddress()); if not vp then return false, "no Recipe typeData" end
+    local dataPtr = _num(_rdu64(vp + 0x178)); if not (dataPtr and dataPtr > 0x10000) then return false, "bad data ptr" end
+    -- idempotent: already present?  + find a valid template element (not ourselves)
+    local srcElem, tName, tPath
+    for i = 0, 268 do
+        local base = dataPtr + i * 0x98
+        local nm, pth
+        pcall(function() nm = ReadFNameAt(hexn(base)) end)
+        if nm == n.asset then log.info(mod_id, "direct_register: '%s' already registered, skip", n.asset); return true end
+        if not srcElem then
+            pcall(function() pth = ReadFNameAt(hexn(base + 0x10)) end)
+            if nm and pth and nm ~= "None" and nm ~= "" and tostring(pth):find("^/Game") then srcElem = base; tName = nm; tPath = pth end
+        end
+    end
+    if not srcElem then return false, "no template element" end
+    local res = RegisterRecipeDirect(hexn(vp), hexn(srcElem), tName, tPath, n.asset, n.package)
+    if not res then return false, "RegisterRecipeDirect nil" end
+    if res.validated == false then return false, "hash mismatch (build layout changed) — refused (safe)" end
+    if (res.after or 0) > (res.before or 0) then
+        log.info(mod_id, "direct_register OK: AssetMap %s -> %s (bucket %s, template '%s')",
+            tostring(res.before), tostring(res.after), tostring(res.bucket), tostring(tName))
+        return true
+    end
+    return false, "no AssetMap delta (ok=" .. tostring(res.ok) .. ")"
+end
+
+-- ★ AssetRegistry CachedAssets write — the .bin/AppendState job, done concretely (no .bin, no LoadFromDisk).
+-- REQUIRED for surfacing on 0.024+: GetAllRecipes' per-entry resolver DROPS any AssetMap entry not also in
+-- CachedAssets (its gate = GetAssetByObjectPath -> CachedAssets.Find). direct_register (AssetMap) alone is
+-- NOT enough. Dry-run self-validated (refuses on hash mismatch); idempotent. The recipe OBJECT must be
+-- loaded+rooted first (register_content does that) so the resolver's FindObject lands.
+local _ar_done = {}
+local function ar_register(n, mod_id)
+    local key = n.package .. "." .. n.asset
+    if _ar_done[key] then return true end
+    if type(RegisterInAssetRegistryDirect) ~= "function" then return false, "RegisterInAssetRegistryDirect missing (update DLL)" end
+    local arh = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
+    local ar; pcall(function() ar = arh:GetAssetRegistry() end)
+    if not _vv(ar) then return false, "no AssetRegistry" end
+    local arAddr = _num(ar:GetAddress()); if not arAddr then return false, "no AR address" end
+    local cset = arAddr + 0x70
+    local dry; pcall(function() dry = RegisterInAssetRegistryDirect(hexn(cset), n.package, n.asset, true) end)
+    if not dry then return false, "AR dry-run nil" end
+    if dry.validated == false then return false, "AR hash mismatch (build layout changed) — refused (safe)" end
+    if (dry.num or 0) >= (dry.max or 0) then return false, "CachedAssets full (no spare slot)" end
+    local res; pcall(function() res = RegisterInAssetRegistryDirect(hexn(cset), n.package, n.asset, false) end)
+    if not (res and res.ok) then return false, "AR write failed (ok=" .. tostring(res and res.ok) .. ")" end
+    _ar_done[key] = true
+    log.info(mod_id, "ar_register OK: CachedAssets %s -> %s (bucket %s)", tostring(res.num), tostring(res.after), tostring(res.bucket))
+    return true
+end
+
+-- LEGACY: cooked AssetRegistry.bin merge via LoadFromDisk+AppendState. BROKE on the 0.024 hotfix
+-- (LoadFromDisk refactored to virtual dispatch). Kept only as a fallback if RegisterRecipeDirect
+-- is unavailable. Returns ok, err.
 local function merge_registry(bin_path, scan_path, mod_id)
     local arh = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
     local ar; pcall(function() ar = arh:GetAssetRegistry() end)
@@ -711,16 +784,28 @@ local function merge_registry(bin_path, scan_path, mod_id)
             end
         end
     end
-    if not loadFromDisk then return false, "could not resolve LoadFromDisk" end
+    -- 0.024 hotfix re-architected the registry load (LoadFromDisk -> layered virtual dispatch),
+    -- so the cooked-.bin load step may fail. DON'T bail — fall through to the scan step (the
+    -- "front door": ScanPathsForPrimaryAssets, a separate/stabler anchor), which may register the
+    -- asset on its own from the mounted pak. Experiment: does scan-only register without the .bin?
+    if not loadFromDisk then
+        log.warn(mod_id, "LoadFromDisk unresolved (build %s) — falling through to SCAN-ONLY registration", "23817455")
+    end
 
     local before = _recipe_assetmap_num(amAddr)
-    local ok = MergeRegistryFromDisk(loadFromDisk, hexn(iface), appendFn, bin_path)
+    local ok = false
+    if loadFromDisk then ok = MergeRegistryFromDisk(loadFromDisk, hexn(iface), appendFn, bin_path) end
     local sr; pcall(function() sr = FindStringRefs("UAssetManager::ScanPathsForPrimaryAssets") end)
+    local scanResolved = sr and sr.refs and sr.refs[1] and true or false
     local cls = StaticFindObject("/Script/Vein.BaseRecipe"); local clsAddr = _vv(cls) and cls:GetAddress() or 0
-    if sr and sr.refs and sr.refs[1] then pcall(function() ScanPathsForType(sr.refs[1].func, amAddr, "Recipe", scan_path, clsAddr) end) end
+    if scanResolved then pcall(function() ScanPathsForType(sr.refs[1].func, amAddr, "Recipe", scan_path, clsAddr) end) end
     local after = _recipe_assetmap_num(amAddr)
-    log.info(mod_id, "merge_registry: AssetMap %s -> %s (merge ok=%s)", tostring(before), tostring(after), tostring(ok))
-    return true
+    log.info(mod_id, "merge_registry: AssetMap %s -> %s (load ok=%s, scanAnchor=%s, scan_path=%s)",
+        tostring(before), tostring(after), tostring(ok), tostring(scanResolved), tostring(scan_path))
+    -- success if the AssetMap actually grew (registration happened by whichever step worked)
+    if after and before and after > before then return true end
+    if ok then return true end
+    return false, "neither load nor scan registered the asset (AssetMap unchanged)"
 end
 
 -- Normalize a manifest recipe entry (friendly OR explicit) into internal fields.
@@ -791,23 +876,37 @@ local _registered = {}
 local function register_content(spec, mod_root, mod_id)
     local n, err = normalize(spec, mod_root)
     if not n then log.error(mod_id, "recipe spec invalid: %s", tostring(err)); return false end
-    if n.registry_bin then
-        local ok, merr = merge_registry(n.registry_bin, n.scan_path, mod_id)
-        if not ok then log.warn(mod_id, "merge_registry failed (%s) — recipe may not register", tostring(merr)) end
+    -- ★ DURABLE registration first (direct TSet write, no .bin needed). Fall back to the legacy
+    -- .bin merge only if the direct path is unavailable (older DLL).
+    local dok, derr = direct_register(n, mod_id)
+    if not dok then
+        log.warn(mod_id, "direct_register failed (%s)", tostring(derr))
+        if n.registry_bin then
+            local ok, merr = merge_registry(n.registry_bin, n.scan_path, mod_id)
+            if not ok then log.warn(mod_id, "merge_registry fallback failed (%s) — recipe may not register", tostring(merr)) end
+        end
     end
-    local rec = _load_obj(n.package .. "." .. n.asset)
+    -- ★ Load the cooked recipe via AssetRegistryHelpers:GetAsset (BPModLoader's primitive) — LoadAsset
+    -- fails for cooked mod-pak assets on 0.024, so _load_obj's LoadAsset fallback isn't enough here.
+    local rec = _load_from_pak(n.package, n.asset)
+    if not _vv(rec) then rec = _load_obj(n.package .. "." .. n.asset) end  -- fallback for already-loaded/non-pak
     if not _vv(rec) then log.error(mod_id, "recipe did not load: %s", n.package); return false end
     repair_recipe(rec, n, mod_id)
     -- ★ GC KEEP-ALIVE: nothing else roots the loaded recipe, so root it (Lua ref + engine-side
     -- PreloadedAssets) — else GC frees it after we return and native surfacing has no object.
     _registered[#_registered + 1] = rec
     if type(RegisterPreloadedAsset) == "function" then pcall(function() RegisterPreloadedAsset("Recipe", n.asset, rec) end) end
+    -- ★ THE 0.024 SURFACING FIX: AssetMap entry alone is dropped by GetAllRecipes' resolver unless the
+    -- asset is ALSO in the AssetRegistry CachedAssets. Write it now (object is loaded+rooted above).
+    local aok, aerr = ar_register(n, mod_id)
+    if not aok then log.warn(mod_id, "ar_register failed (%s) — registered but may NOT surface in the bench", tostring(aerr)) end
     -- diagnostics: prove every field resolved (None => silent bench-filter skip = "doesn't show")
     local function _nm(o) local s = "None"; pcall(function() if o and o:IsValid() then s = o:GetFName():ToString() end end); return s end
     local rn = "?"; pcall(function() rn = rec.RecipeName:ToString() end)
     local rtn = "?"; pcall(function() rtn = _nm(rec.RecipeType) end)
     local wtn = "?"; pcall(function() wtn = _nm(rec.PossibleIngredients[1].WorkbenchType) end)
     local res = "?"; pcall(function() res = _nm(rec.Results[1].Item) end)
+    local q1 = "?"; pcall(function() q1 = tostring(rec.PossibleIngredients[1].Ingredients[1].Quantity) end)
     local sets = {}
     pcall(function()
         for si = 1, (rec.PossibleIngredients:GetArrayNum() or 0) do
@@ -816,8 +915,8 @@ local function register_content(spec, mod_root, mod_id)
             sets[#sets+1] = "set" .. si .. "[" .. table.concat(p, ",") .. "]"
         end
     end)
-    log.info(mod_id, "register_content OK: '%s' RT=%s WT=%s Result=%s ingredients=%s",
-             tostring(rn), tostring(rtn), tostring(wtn), tostring(res), table.concat(sets, " "))
+    log.info(mod_id, "register_content OK: '%s' RT=%s WT=%s Result=%s Ing1Qty=%s ingredients=%s",
+             tostring(rn), tostring(rtn), tostring(wtn), tostring(res), tostring(q1), table.concat(sets, " "))
     return true
 end
 M.register_content = register_content
