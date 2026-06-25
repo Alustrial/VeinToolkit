@@ -4,8 +4,10 @@ A modding framework for **VEIN**, in two halves:
 - **Content** — add **new craftable recipes** that show up and craft in the game's own system, from a
   small JSON manifest. No editing game files.
 - **Scripting** — write small **Lua** mods against a clean verb API (`veincf.world.spawn`,
-  `veincf.world.on`, `veincf.player.heal`, …) to make things *happen* in the live game: spawn, hook
-  events, mechanics, timers. No Unreal editor, no reverse-engineering the game.
+  `veincf.world.on`, `veincf.player.heal`, …) to make things *happen* in the live game: spawn and hook
+  events, deal/heal damage and aim, give and use items, attach things to cars and storage, open real
+  game-styled UI windows, register new game data with no cooking, save data between sessions, and check
+  multiplayer authority. No Unreal editor, no reverse-engineering the game.
 
 > **Recipes = what exists; scripting = how it behaves.** Most mods use one or the other; big ones use
 > both. All of it is zero-art, runs on launch, and nothing existing is overwritten.
@@ -81,14 +83,26 @@ The verbs (the framework gives you the blocks; the *mechanic* is your script):
 
 | Namespace | Verbs |
 |-----------|-------|
-| `veincf.world`  | `spawn(class, opts)` (body + AI), `on(class,"Event",fn)` / `off`, `is_dead`, `get_health`, `destroy`, `find`, `find_class`, `set_weather`, `add_time`, `teleport_to`, `explosion`, `zombify` |
-| `veincf.player` | `heal`, `damage`, `give_item(name,n)`, `has_item(class)`, `remove_amount(class,n)`, `set_condition(name,amt)`, `add_xp`, `power_up`, `get_health/conditions/stats/inventory` |
-| `veincf.actor`  | `location`, `set_location`, `set_scale`, `distance` |
+| `veincf.world`  | `spawn(class, opts)` (body + AI), `on(class,"Event",fn)` / `off`, `damage(t,n)` / `heal(t,n)` / `kill(t)` / `set_invincible`, `aim_target([class])` (what you're aimed at), `is_dead`, `get_health`, `destroy`, `find`, `find_class`, `set_weather`, `add_time`, `teleport_to`, `explosion`, `zombify` |
+| `veincf.player` | `heal`, `damage`, `give_item(name,n)` (any of ~1345 items), `has_item(class)`, `remove_amount(class,n)`, `use_equipped`, `set_condition(name,amt)`, `add_xp`, `power_up`, `get_health/conditions/stats/inventory` |
+| `veincf.actor`  | `location`, `set_location`, `set_scale`, `distance`, `attach(child, parent[, socket])` / `detach` (cars & storage hold things) |
+| `veincf.ui`     | `spawn_widget("WBP_X_C")` (HUD overlay), `open_window("WBP_X_C")` (managed window — ESC closes it), `find_widget`, `set_visible`, `remove` |
+| `veincf.data`   | `register{type, asset, fields}` — register new game data (an illness, addiction, … any of the 49 data types) with **no cooking** |
+| `veincf.store`  | `set(k,v)`, `get(k,default)`, `save()`, `load()` — per-mod data that survives between sessions |
+| `veincf.net`    | `is_server`, `is_client`, `is_standalone`, `has_authority(actor)`, `authority_only(fn)` |
 | `veincf.timer`  | `loop(ms,fn)` (return `true` to stop), `after(ms,fn)`, `cancel(handle)` |
 
-A handful of verbs compose into a real mechanic — a self-refilling brood encounter, "when a zombie dies
-two more rise," heal-on-kill, a triggered ambush. Runnable examples are in **[examples/](examples/)**
-(`death_message`, `they_multiply`) — drop a folder into `Mods/VeinCF/mods/` and launch.
+A handful of verbs compose into a real mechanic. A "zap gun" is four lines — damage whatever you're aimed at:
+```lua
+veincf.timer.loop(100, function()
+    local target = veincf.world.aim_target("BP_Zombie_C")
+    if target then veincf.world.damage(target, 25) end
+end)
+```
+Same idea builds a self-refilling brood encounter, "when a zombie dies two more rise," heal-on-kill, a
+triggered ambush, a custom trader window, persistent mod state. Runnable examples are in
+**[examples/](examples/)** (`death_message`, `they_multiply`) — drop a folder into `Mods/VeinCF/mods/`
+and launch.
 
 ## Extending it / continuing the work
 Want to bulk-add recipes, hack on the framework, or branch into new content types? Read
@@ -104,8 +118,10 @@ API, the engine toolkit, and how to add a new content type.
   a wrong content path in the manifest, or the pak/registry not matching your game version.
 - **Will it break when VEIN updates?** Possibly — the runtime is built for a specific VEIN version
   and cooked content is version-matched. A big game patch may need an updated build.
-- **Can I make new items / guns?** Not in v1. v1 is recipes (combining existing items). New item
-  types are a future version.
+- **Can I make new items / guns?** You can hand out and use *any* of the game's ~1345 existing items by
+  name (`veincf.player.give_item`), and you can script **gun/ability behavior** (`veincf.world.aim_target`
+  + `damage`). What's *not* supported is brand-new item **types** with their own mesh/stats — those need a
+  cooked Blueprint, which is outside this toolkit's zero-art scope.
 
 ## Source / rebuilding
 This repo ships the prebuilt runtime so you can just *use* it. The DLL is compiled from the VEIN
