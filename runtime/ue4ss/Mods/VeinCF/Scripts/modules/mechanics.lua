@@ -39,6 +39,19 @@ local function resolve_class(item)
     return nil
 end
 
+-- resolve a WIDGET class: widget classes are WidgetBlueprintGeneratedClass (NOT BlueprintGeneratedClass);
+-- the live instance is the most reliable source. Falls back to the generic resolver.
+local function resolve_widget_class(name)
+    if type(name) == "userdata" then return name end
+    local c; pcall(function() c = FindObject("WidgetBlueprintGeneratedClass", name) end)
+    if c and c.IsValid and c:IsValid() then return c end
+    for _, ww in ipairs(FindAllOf("UserWidget") or {}) do
+        local cn; pcall(function() cn = ww:GetClass():GetFName():ToString() end)
+        if cn == name then local cc; pcall(function() cc = ww:GetClass() end); if cc and cc.IsValid and cc:IsValid() then return cc end end
+    end
+    return resolve_class(name)
+end
+
 -- call CheatManager:Verb(...) safely. fn does the actual call; returns ok(boolean).
 local function cmcall(fn)
     local c = cm(); if not c then return false, "no CheatManager" end
@@ -161,6 +174,187 @@ end
 
 --- Resolve a class object by "BP_X_C" name or object path. @return UClass|nil
 function M.find_class(name) return resolve_class(name) end
+
+-- ── health-component verbs (ANY actor) — VEIN's REAL damage path (engine ApplyDamage is a no-op on VEIN) ──
+-- Proven 2026-06-25: HealthComponent GetHealth()/SetHealth(HP)/ModifyHealth(Amount)/SetInvincible(bool).
+-- A live zombie 30.26 HP -> ModifyHealth(-9999) -> 0 (died). All single Double args, reflection, no DLL.
+local function health_comp(actor)
+    if not (actor and actor.IsValid and actor:IsValid()) then return nil end
+    local hc; pcall(function() hc = actor:GetHealthComponent() end)
+    if not (hc and hc.IsValid and hc:IsValid()) then pcall(function() hc = actor.Health end) end
+    if hc and hc.IsValid and hc:IsValid() then return hc end
+    return nil
+end
+M.health_component = health_comp
+
+--- Any actor's current health (via the component getter; reads Double). @return number|nil
+function M.health_of(actor)
+    local hc = health_comp(actor); if not hc then return nil end
+    local v; pcall(function() v = hc:GetHealth() end)
+    return isnum(v) and v or nil
+end
+--- Damage any actor by `amount` (graded). veincf.world.damage(target, n).
+function M.damage_actor(actor, amount)
+    if not (isnum(amount) and amount >= 0) then return false, "damage_actor(actor, amount>=0)" end
+    local hc = health_comp(actor); if not hc then return false, "no health component" end
+    return (pcall(function() hc:ModifyHealth(-amount) end))
+end
+--- Heal any actor by `amount`. veincf.world.heal(target, n).
+function M.heal_actor(actor, amount)
+    if not (isnum(amount) and amount >= 0) then return false, "heal_actor(actor, amount>=0)" end
+    local hc = health_comp(actor); if not hc then return false, "no health component" end
+    return (pcall(function() hc:ModifyHealth(amount) end))
+end
+--- Kill any actor. veincf.world.kill(target). Routes through the DAMAGE path (ModifyHealth) so the
+--- death cascade (ragdoll/anim/loot) fires — a raw SetHealth(0) zeroes health but skips the death trigger.
+function M.kill(actor)
+    local hc = health_comp(actor); if not hc then return false, "no health component" end
+    return (pcall(function() hc:ModifyHealth(-1000000.0) end))
+end
+--- Make an actor invincible / mortal. veincf.world.set_invincible(target, bool).
+function M.set_invincible(actor, on)
+    local hc = health_comp(actor); if not hc then return false, "no health component" end
+    return (pcall(function() hc:SetInvincible(on and true or false) end))
+end
+
+--- The actor your VIEW is pointed at — eyes + view-forward alignment (dot-product) over instances of a
+--- class (default BP_Zombie_C). Reflection only, no DLL trace (NOT wall-aware; precise line-trace is future
+--- polish). aim_target("BP_Zombie_C", {cone=0.95, range=6000}). Pairs with world.damage = a gun/ability.
+function M.aim_target(className, opts)
+    local p = pc(); if not p then return nil end
+    local ex, ey, ez; pcall(function() local l = p:K2_GetActorLocation(); ex, ey, ez = l.X, l.Y, l.Z end)
+    local fx, fy, fz
+    local pctrl; pcall(function() pctrl = p:GetController() end)
+    local fwd; if pctrl then pcall(function() fwd = pctrl:GetActorForwardVector() end) end
+    if type(fwd) ~= "table" then pcall(function() fwd = p:GetActorForwardVector() end) end
+    if type(fwd) == "table" then fx, fy, fz = fwd.X, fwd.Y, fwd.Z end
+    if not (isnum(ex) and isnum(fx)) then return nil end
+    local cone = (opts and opts.cone) or 0.95
+    local range = (opts and opts.range) or 6000
+    local best, bestdot = nil, cone
+    for _, a in ipairs(FindAllOf(className or "BP_Zombie_C") or {}) do
+        local al; pcall(function() al = a:K2_GetActorLocation() end)
+        if al then
+            local dx, dy, dz = (al.X or 0) - ex, (al.Y or 0) - ey, (al.Z or 0) - ez
+            local d = math.sqrt(dx*dx + dy*dy + dz*dz)
+            if d > 1 and d < range then
+                local dot = (dx/d)*fx + (dy/d)*fy + (dz/d)*fz
+                if dot > bestdot then bestdot = dot; best = a end
+            end
+        end
+    end
+    return best
+end
+
+-- ── attach / detach (cars / storage / placeables that hold things) — reflected K2_AttachToActor ──
+-- Proven 2026-06-25 (a zombie snapped to the player). EAttachmentRule: KeepRelative=0/KeepWorld=1/SnapToTarget=2.
+function M.attach(child, parent, socket)
+    if not (child and child.IsValid and child:IsValid()) then return false, "attach: invalid child" end
+    if not (parent and parent.IsValid and parent:IsValid()) then return false, "attach: invalid parent" end
+    local sock = fname(socket or "None"); if not sock then return false, "attach: FName failed" end
+    return (pcall(function() child:K2_AttachToActor(parent, sock, 2, 2, 2, false) end))   -- SnapToTarget all
+end
+function M.detach(child)
+    if not (child and child.IsValid and child:IsValid()) then return false, "detach: invalid child" end
+    return (pcall(function() child:K2_DetachFromActor(0, 0, 0) end))   -- KeepRelative
+end
+
+-- ── inventory / interaction (struct-arg) — via the DLL ReadStructValue + CallWithStruct primitives ──
+-- The struct param (ItemInstance) can't round-trip through UE4SS Lua reflection (hard-locks); we read its
+-- raw bytes + build the param frame in C++. Proven 2026-06-25 (Server_UseItem ran clean). `action_id` is
+-- the use-action Name (defaults "None"); a real id may be needed for a visible effect — TBD per item.
+function M.use_equipped(action_id)
+    local p = pc(); if not p then return false, "no player" end
+    if type(ReadStructValue) ~= "function" or type(CallWithStruct) ~= "function" then
+        return false, "DLL ReadStructValue/CallWithStruct missing"
+    end
+    local h; pcall(function() h = ReadStructValue(p, "GetEquippedItemInstance") end)
+    if not (h and h.ptr) then return false, "no equipped item (or getter failed)" end
+    local r; pcall(function() r = CallWithStruct(p, "Server_UseItem", h.ptr, h.size, action_id or "None") end)
+    return (r and r.ok and r.structWrote == 1) or false, r
+end
+
+-- ── net / authority (MP server-authority gates) — see library docs/ue56-save-and-replication.md ──
+-- ENetMode: NM_Standalone=0, NM_DedicatedServer=1, NM_ListenServer=2, NM_Client=3 (< NM_Client = a server).
+-- ENetRole: ROLE_Authority=3. Best-effort reflection reads; SP / unknown => server + authority.
+local function _netmode()
+    local p = pc(); if not p then return nil end
+    local m; pcall(function() m = p:GetNetMode() end)
+    return isnum(m) and m or nil
+end
+M.net_mode = _netmode
+function M.is_standalone() local m = _netmode(); return m == nil or m == 0 end
+function M.is_server()     local m = _netmode(); return m == nil or m < 3 end
+function M.is_client()     return _netmode() == 3 end
+function M.has_authority(actor)
+    local a = actor or pc(); if not a then return true end
+    local r; pcall(function() r = a:GetLocalRole() end)
+    if not isnum(r) then pcall(function() r = a.Role end) end
+    if isnum(r) then return r == 3 end
+    return true   -- SP / unknown => assume authority
+end
+function M.authority_only(fn)
+    if type(fn) ~= "function" then return false, "authority_only(fn)" end
+    if M.has_authority() then return fn() end
+    return nil
+end
+
+-- ── UI — reuse the game's own widgets (UMG). Create an instance of an existing WBP + add to viewport.
+-- WidgetBlueprintLibrary:Create(WorldContext, WidgetType:class, OwningPlayer) -> UserWidget (all reflected).
+-- ⚠ build/add our OWN instance; NEVER mutate a LIVE game-owned widget mid-paint (crash). See ui-and-attach.md.
+-- ★ PROVEN 2026-06-25: UMG Create needs a live WIDGET (the HUD) as WorldContext — a raw controller/pawn
+-- returns null. Use the live HUD (any live UserWidget) for context; class must be loaded (resolve_class).
+local function _create_widget(cls)
+    local hud = (FindAllOf("WBP_HUD_C") or {})[1] or (FindAllOf("UserWidget") or {})[1]
+    if not (hud and hud.IsValid and hud:IsValid()) then return nil, "no live widget for context (enter a world)" end
+    local owner; pcall(function() owner = hud:GetOwningPlayer() end)
+    local wbl = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
+    local w
+    if type(CallReturningObject) == "function" and wbl then
+        pcall(function() w = CallReturningObject(wbl, "Create", hud, cls, owner) end)   -- live HUD = WorldContext
+    end
+    if not (w and w.IsValid and w:IsValid()) then                                       -- fallback: construct w/ HUD outer
+        pcall(function() w = StaticConstructObject(cls, hud, FName("None"), 0, 0, nil, false, false, nil) end)
+    end
+    if not (w and w.IsValid and w:IsValid()) then return nil, "creation failed" end
+    return w
+end
+
+--- Create a widget + show it as a viewport OVERLAY (HUD-style). veincf.ui.spawn_widget("WBP_X_C").
+function M.spawn_widget(wbp_class, opts)
+    local cls = resolve_widget_class(wbp_class); if not cls then return nil, "spawn_widget: class not found/loaded: " .. tostring(wbp_class) end
+    local w, err = _create_widget(cls); if not w then return nil, "spawn_widget: " .. tostring(err) end
+    pcall(function() w:AddToViewport((opts and opts.zorder) or 0) end)
+    return w
+end
+
+--- Open a proper MANAGED window (escapable/layered) — the game uses Epic CommonUI: the window stack is a
+--- CommonActivatableWidgetStack and BP_AddWidget(class) creates + pushes it. veincf.ui.open_window("WBP_X_C").
+--- The widget class should be a CommonActivatableWidget (the game's window base) to be stack-managed.
+function M.open_window(wbp_class, opts)
+    local cls = resolve_widget_class(wbp_class); if not cls then return nil, "open_window: class not found/loaded: " .. tostring(wbp_class) end
+    local wc = (FindAllOf("WBP_RootWindowContainer_C") or {})[1]
+    local stack; if wc and wc.IsValid and wc:IsValid() then pcall(function() stack = wc:GetStack() end) end
+    if stack and stack.IsValid and stack:IsValid() then
+        local w
+        if type(CallReturningObject) == "function" then pcall(function() w = CallReturningObject(stack, "BP_AddWidget", nil, cls, nil) end) end
+        if not (w and w.IsValid and w:IsValid()) then pcall(function() stack:BP_AddWidget(cls) end) end       -- side-effect even if the return drops
+        if not (w and w.IsValid and w:IsValid()) then pcall(function() w = stack:GetActiveWidget() end) end  -- recover the top-of-stack
+        return w or true
+    end
+    -- fallback: unmanaged overlay if there's no window stack
+    local w2 = _create_widget(cls); if w2 then pcall(function() w2:AddToViewport((opts and opts.zorder) or 50) end) end
+    return w2
+end
+function M.find_widget(name) return (FindAllOf(name) or {})[1] end
+function M.set_widget_visible(w, vis)
+    if not (w and w.IsValid and w:IsValid()) then return false end
+    return (pcall(function() w:SetVisibility(vis and 0 or 1) end))   -- ESlateVisibility: Visible=0 / Collapsed=1
+end
+function M.remove_widget(w)
+    if not (w and w.IsValid and w:IsValid()) then return false end
+    return (pcall(function() w:RemoveFromParent() end))
+end
 
 -- ── actor transform / state helpers ────────────────────
 --- @return {x,y,z}|nil

@@ -11,6 +11,8 @@ local config  = require("modules.config")
 local api     = require("modules.api")
 local recipes = require("modules.recipes")
 local mechanics = require("modules.mechanics")
+local store   = require("modules.store")
+pcall(function() store.bind("ue4ss/Mods/VeinCF/veincf_store.json") end)  -- relative to game cwd (Binaries/Win64)
 
 local M = {}
 
@@ -231,6 +233,10 @@ local function build_mod_env(mod_id, mod_root)
             raw               = recipes.raw,
             register_content  = recipes.register_content,
         },
+        -- text-native content: register a new entry of ANY primary-asset type (no pak/cook/.bin)
+        data = {
+            register = recipes.register_data,  -- register_data{ type="Illness", asset="ILL_X", fields={...} }
+        },
         -- gameplay verbs (reflected; crash-safe wrappers — see modules/mechanics.lua)
         player = {
             get                 = mechanics.player,   -- the local player pawn
@@ -262,13 +268,20 @@ local function build_mod_env(mod_id, mod_root)
             -- inventory (class-based, no struct): has_item(class) / remove_amount(class, count)
             has_item            = mechanics.has_item,
             remove_amount       = mechanics.remove_amount,
+            -- inventory (struct-arg, via DLL ReadStructValue+CallWithStruct): use the equipped item
+            use_equipped        = mechanics.use_equipped,
         },
         -- world: BASE VERBS (primitives — modders compose mechanics like brood/dungeon themselves)
         world = {
             spawn       = mechanics.spawn,        -- functional spawn (body+AI): spawn(class, {near,x,y,z,scale,ai})
             give_ai     = mechanics.give_ai,      -- possess a pawn with its default AI controller
             is_dead     = mechanics.is_dead,
-            get_health  = mechanics.get_health_of,-- any actor's health
+            get_health  = mechanics.health_of,    -- any actor's health (component getter — reliable)
+            damage      = mechanics.damage_actor, -- damage(target, n) — VEIN's real health path (engine ApplyDamage is a no-op on VEIN)
+            heal        = mechanics.heal_actor,   -- heal(target, n)
+            kill        = mechanics.kill,         -- kill(target) (health -> 0)
+            set_invincible = mechanics.set_invincible,
+            aim_target  = mechanics.aim_target,  -- aim_target([class],[opts]) — actor you're aimed at (eyes+forward); pair w/ damage = a gun
             destroy     = mechanics.destroy,
             find        = mechanics.find,         -- all live instances of a class name
             find_class  = mechanics.find_class,   -- resolve a class by name/path
@@ -293,11 +306,35 @@ local function build_mod_env(mod_id, mod_root)
             set_location = mechanics.set_location,
             set_scale    = mechanics.set_scale,
             distance     = mechanics.distance,
+            attach       = mechanics.attach,    -- attach(child, parent[, socket]) — cars/storage hold things
+            detach       = mechanics.detach,    -- detach(child)
         },
         timer = {
             loop   = mechanics.loop,    -- loop(ms, fn): fn returns true to stop
             after  = mechanics.after,   -- after(ms, fn): one-shot
             cancel = mechanics.cancel,  -- cancel(handle)
+        },
+        -- persistence (JSON file; patch-proof, no engine dep). Namespace your keys ("mymod.score").
+        store = {
+            set  = store.set,  get  = store.get,  all = store.all,
+            save = store.save, load = store.load,
+        },
+        -- UI: reuse the game's own UMG widgets (instantiate an existing WBP + add to viewport)
+        ui = {
+            spawn_widget = mechanics.spawn_widget,  -- overlay (HUD-style): create + AddToViewport
+            open_window  = mechanics.open_window,    -- proper window: create + WBP_RootWindowContainer_C stack
+            find_widget  = mechanics.find_widget,
+            set_visible  = mechanics.set_widget_visible,
+            remove       = mechanics.remove_widget,
+        },
+        -- MP server-authority gates (reflection reads; SP => server+authority)
+        net = {
+            is_server      = mechanics.is_server,
+            is_client      = mechanics.is_client,
+            is_standalone  = mechanics.is_standalone,
+            has_authority  = mechanics.has_authority,
+            authority_only = mechanics.authority_only,
+            mode           = mechanics.net_mode,
         },
         -- game definitions (lazy-loaded from generated defs)
         defs = (function()

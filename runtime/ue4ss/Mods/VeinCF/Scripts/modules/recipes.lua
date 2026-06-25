@@ -922,6 +922,108 @@ end
 M.register_content = register_content
 
 ------------------------------------------------------------
+-- ★ register_data(opts) — TYPE-GENERAL content registration (PROVEN 2026-06-25: Illness + Addiction).
+-- Construct a new primary-asset entry of ANY of the 49 data-asset types, in memory, NO pak/cook/.bin:
+-- clone a donor of the same type (StaticConstructObject + CopyAllProperties), override fields, two-write
+-- (AssetMap + AssetRegistry CachedAssets; the DLL prims grow tight maps via veincf_sparseset_prepare).
+-- opts = { type="Illness" (PRIMARY-type name, NOT the data-class "IllnessType"), asset="ILL_MyThing",
+--          package=nil (auto "/Game/VeinCF/<asset>"), fields={ FieldName=value, ... } overrides on the clone }
+-- @return boolean ok, string|nil err, UObject|nil obj
+------------------------------------------------------------
+local function _dr_typedata(amAddr, typeName)
+    local dataPtr = _num(_rdu64(amAddr + 0x470)); local arrNum = _rd32(amAddr + 0x478)
+    if not (dataPtr and arrNum) then return nil end
+    for i = 0, math.min(arrNum, 4096) - 1 do
+        local elem = dataPtr + i * 0x20
+        local valPtr = _num(_rdu64(elem + 0x08))
+        if valPtr and valPtr > 0x10000 then
+            local nm; pcall(function() nm = ReadFNameAt(hexn(elem)) end)
+            if nm == typeName then return valPtr end
+        end
+    end
+end
+local function _dr_donor(vp, ourAsset)
+    local dataPtr = _num(_rdu64(vp + 0x178)); if not (dataPtr and dataPtr > 0x10000) then return nil end
+    local srcElem, tName, tPath
+    for i = 0, 63 do
+        local base = dataPtr + i * 0x98
+        local nm; pcall(function() nm = ReadFNameAt(hexn(base)) end)
+        if nm == ourAsset then return srcElem, tName, tPath, true end
+        if not srcElem then
+            local pth; pcall(function() pth = ReadFNameAt(hexn(base + 0x10)) end)
+            if nm and pth and nm ~= "None" and nm ~= "" and tostring(pth):find("^/Game") then
+                srcElem, tName, tPath = base, nm, pth
+            end
+        end
+    end
+    return srcElem, tName, tPath, false
+end
+local function _register_data_impl(opts)
+    if type(opts) ~= "table" or type(opts.type) ~= "string" or type(opts.asset) ~= "string" then
+        return false, "register_data{ type=, asset=, [package=], [fields=] }"
+    end
+    if type(RegisterRecipeDirect) ~= "function" or type(RegisterInAssetRegistryDirect) ~= "function" then
+        return false, "DLL register prims missing (rebuild)"
+    end
+    local am = (FindAllOf("VeinAssetManager") or {})[1]; if not am then return false, "no VeinAssetManager" end
+    local amAddr = _num(am:GetAddress()); if not amAddr then return false, "no AM address" end
+    local vp = _dr_typedata(amAddr, opts.type); if not vp then return false, "type '" .. opts.type .. "' not a primary-asset type" end
+    local srcElem, tName, tPath, present = _dr_donor(vp, opts.asset)
+    if present then return true, nil, nil end   -- idempotent: already registered
+    if not srcElem then return false, "no donor element for type '" .. opts.type .. "'" end
+    local donor; pcall(function() donor = StaticFindObject(tostring(tPath)) end)
+    if not _vv(donor) then pcall(function() donor = StaticFindObject(tostring(tPath) .. "." .. tostring(tName)) end) end
+    if not _vv(donor) and type(LoadAsset) == "function" then     -- donor not resident (e.g. items are lazy-loaded) -> load it
+        pcall(function() donor = LoadAsset(tostring(tPath)) end)
+        if not _vv(donor) then pcall(function() donor = StaticFindObject(tostring(tPath) .. "." .. tostring(tName)) end) end
+    end
+    local cls; if _vv(donor) then pcall(function() cls = donor:GetClass() end) end
+    if not _vv(cls) then return false, "could not resolve donor class (donor='" .. tostring(tPath) .. "' not resident/loadable)" end
+    -- own runtime package (fall back to donor's package)
+    local pkgname = opts.package or ("/Game/VeinCF/" .. opts.asset)
+    local cpFn
+    do local r; pcall(function() r = FindStringRefs("Attempted to create a package with an empty package name.") end)
+       if r and r.refs and r.refs[1] then cpFn = r.refs[1].func end end
+    local pkg
+    if cpFn and type(CreateRuntimePackage) == "function" then pcall(function() pkg = CreateRuntimePackage(cpFn, pkgname) end) end
+    if not _vv(pkg) then pcall(function() pkg = donor:GetOuter() end) end
+    if not _vv(pkg) then return false, "no package for construct" end
+    -- construct a copy of the donor + override fields
+    local obj; pcall(function() obj = StaticConstructObject(cls, pkg, mk_fname(opts.asset), 3, 0, nil, false, false, nil) end)
+    if not _vv(obj) then return false, "StaticConstructObject failed" end
+    pcall(function() CopyAllProperties(obj, donor) end)
+    if type(opts.fields) == "table" then
+        for k, v in pairs(opts.fields) do pcall(function() obj[k] = v end) end
+    end
+    if type(RegisterPreloadedAsset) == "function" then pcall(function() RegisterPreloadedAsset(opts.type, opts.asset, obj) end) end
+    local pkgpath; pcall(function() pkgpath = tostring(pkg:GetFullName()):match("^%S+%s+(.+)$") end)
+    pkgpath = pkgpath or pkgname
+    -- two-write (DLL prims grow the map if full)
+    local res; pcall(function() res = RegisterRecipeDirect(hexn(vp), hexn(srcElem), tName, tPath, opts.asset, pkgpath) end)
+    if not res then return false, "RegisterRecipeDirect nil" end
+    if res.validated == false then return false, "AssetMap hash mismatch — refused (build layout changed)" end
+    local arh = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
+    local arobj; pcall(function() arobj = arh:GetAssetRegistry() end)
+    local arAddr = _vv(arobj) and _num(arobj:GetAddress())
+    if arAddr then
+        local cset = arAddr + 0x70
+        local dry; pcall(function() dry = RegisterInAssetRegistryDirect(hexn(cset), pkgpath, opts.asset, true) end)
+        if dry and dry.validated ~= false then pcall(function() RegisterInAssetRegistryDirect(hexn(cset), pkgpath, opts.asset, false) end) end
+    end
+    log.info(opts.mod_id or "veincf", "register_data OK: %s '%s' @ %s (AssetMap %s->%s)",
+        tostring(opts.type), tostring(opts.asset), tostring(pkgpath), tostring(res.before), tostring(res.after))
+    return true, nil, obj
+end
+--- Public: register a new data-asset entry of any primary-asset type, text-native (no pak/cook). Game-thread.
+function M.register_data(opts)
+    local ok, err, obj
+    ExecuteInGameThread(function() ok, err, obj = _register_data_impl(opts) end)
+    return ok, err, obj
+end
+M.raw = M.raw or {}
+M.raw.register_data = _register_data_impl
+
+------------------------------------------------------------
 -- World-load queue: mods declare recipes at mod-load (startup, no AssetManager yet); we
 -- QUEUE them and run register_content at WORLD-LOAD (AssetManager exists, before the craft
 -- UI builds its tiles -> the game surfaces them natively). One driver for all mods.
