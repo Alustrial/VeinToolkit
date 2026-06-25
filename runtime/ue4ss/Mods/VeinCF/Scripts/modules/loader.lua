@@ -10,6 +10,7 @@ local log     = require("modules.log")
 local config  = require("modules.config")
 local api     = require("modules.api")
 local recipes = require("modules.recipes")
+local mechanics = require("modules.mechanics")
 
 local M = {}
 
@@ -229,6 +230,74 @@ local function build_mod_env(mod_id, mod_root)
             register_backend  = recipes.register_backend,
             raw               = recipes.raw,
             register_content  = recipes.register_content,
+        },
+        -- gameplay verbs (reflected; crash-safe wrappers — see modules/mechanics.lua)
+        player = {
+            get                 = mechanics.player,   -- the local player pawn
+            get_health          = mechanics.get_health,
+            heal                = mechanics.heal,
+            heal_everyone       = mechanics.heal_everyone,
+            damage              = mechanics.damage,
+            damage_consciousness = mechanics.damage_consciousness,
+            damage_target       = mechanics.damage_target,
+            set_item_damage     = mechanics.set_item_damage,
+            set_vehicle_damage  = mechanics.set_vehicle_damage,
+            give_key            = mechanics.give_key,
+            give_ammo           = mechanics.give_ammo,
+            -- give / items (contract cracked 2026-06-24: GiveItem(name:string, count:number))
+            give_item           = mechanics.give_item,
+            give_item_list      = mechanics.give_item_list,
+            give_every_item     = mechanics.give_every_item,
+            -- progress / status
+            add_xp              = mechanics.add_xp,
+            add_perk            = mechanics.add_perk,
+            power_up            = mechanics.power_up,
+            set_condition       = mechanics.set_condition,   -- set_condition(name, amount)
+            ignite              = mechanics.ignite_target,
+            -- reads
+            get_conditions      = mechanics.get_conditions,
+            get_stats           = mechanics.get_stats,
+            get_inventory       = mechanics.get_inventory,
+            get_temperature     = mechanics.get_temperature,
+            -- inventory (class-based, no struct): has_item(class) / remove_amount(class, count)
+            has_item            = mechanics.has_item,
+            remove_amount       = mechanics.remove_amount,
+        },
+        -- world: BASE VERBS (primitives — modders compose mechanics like brood/dungeon themselves)
+        world = {
+            spawn       = mechanics.spawn,        -- functional spawn (body+AI): spawn(class, {near,x,y,z,scale,ai})
+            give_ai     = mechanics.give_ai,      -- possess a pawn with its default AI controller
+            is_dead     = mechanics.is_dead,
+            get_health  = mechanics.get_health_of,-- any actor's health
+            destroy     = mechanics.destroy,
+            find        = mechanics.find,         -- all live instances of a class name
+            find_class  = mechanics.find_class,   -- resolve a class by name/path
+            on          = mechanics.on,           -- event hook: on(class, "FuncName", cb) -> handle (the trigger primitive)
+            off         = mechanics.off,           -- off(handle)
+            spawn_horde = mechanics.spawn_horde,
+            spawn_flyby = mechanics.spawn_flyby,
+            -- teleport / movement (TargetId / VectorString are name/string args)
+            teleport_to     = mechanics.teleport_to,
+            teleport_all_to = mechanics.teleport_all_to,
+            bring_all_to_me = mechanics.bring_all_to_me,
+            goto_vec        = mechanics.goto_vec,
+            -- world / event
+            explosion   = mechanics.explosion,
+            set_weather = mechanics.set_weather,
+            add_time    = mechanics.add_time,
+            remove_ai   = mechanics.remove_ai,
+            zombify     = mechanics.zombify,
+        },
+        actor = {
+            location     = mechanics.location,
+            set_location = mechanics.set_location,
+            set_scale    = mechanics.set_scale,
+            distance     = mechanics.distance,
+        },
+        timer = {
+            loop   = mechanics.loop,    -- loop(ms, fn): fn returns true to stop
+            after  = mechanics.after,   -- after(ms, fn): one-shot
+            cancel = mechanics.cancel,  -- cancel(handle)
         },
         -- game definitions (lazy-loaded from generated defs)
         defs = (function()

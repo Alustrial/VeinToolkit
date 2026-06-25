@@ -1,11 +1,14 @@
 # Vein Toolkit
 
-A modding framework for **VEIN** that lets you add **new craftable recipes** to the game —
-on launch, no buttons, no editing game files. You write a small JSON manifest; the toolkit
-registers your recipe into the game's own crafting system so it shows up and crafts natively.
+A modding framework for **VEIN**, in two halves:
+- **Content** — add **new craftable recipes** that show up and craft in the game's own system, from a
+  small JSON manifest. No editing game files.
+- **Scripting** — write small **Lua** mods against a clean verb API (`veincf.world.spawn`,
+  `veincf.world.on`, `veincf.player.heal`, …) to make things *happen* in the live game: spawn, hook
+  events, mechanics, timers. No Unreal editor, no reverse-engineering the game.
 
-> **v1 — Recipes.** Future versions add more (items, gear, and beyond). v1 does recipes, and
-> does them properly: net-new recipes, native display, real crafting.
+> **Recipes = what exists; scripting = how it behaves.** Most mods use one or the other; big ones use
+> both. All of it is zero-art, runs on launch, and nothing existing is overwritten.
 
 ## What it can do (v1)
 - Add **new recipes** that craft *any existing item* from *any existing ingredients*
@@ -61,6 +64,31 @@ And the recipe itself reads like English:
 A working example is in **[examples/banana_plunger/](examples/banana_plunger/)** — a craftable
 Banana Plunger (Banana + Nail → Plunger, at the Standard workbench). **To try it:** copy the
 `banana_plunger` folder into `ue4ss/Mods/VeinCF/mods/` and launch — it's in the Weapons tab.
+
+## Scripting — make things *happen* (the verb kit)
+Recipes add *content*; scripting adds *behavior*. A script mod is just a folder with a `manifest.json`
+and a `scripts/main.lua` — drop it in `Mods/VeinCF/mods/`, and your Lua runs in the live game with the
+`veincf` API in scope. **No pak, no Unreal.**
+
+```lua
+-- the whole mod: log a line every time a zombie dies
+veincf.world.on("BP_Zombie_C", "OnDeath", function(who)
+    veincf.log.info("another one down")
+end)
+```
+
+The verbs (the framework gives you the blocks; the *mechanic* is your script):
+
+| Namespace | Verbs |
+|-----------|-------|
+| `veincf.world`  | `spawn(class, opts)` (body + AI), `on(class,"Event",fn)` / `off`, `is_dead`, `get_health`, `destroy`, `find`, `find_class`, `set_weather`, `add_time`, `teleport_to`, `explosion`, `zombify` |
+| `veincf.player` | `heal`, `damage`, `give_item(name,n)`, `has_item(class)`, `remove_amount(class,n)`, `set_condition(name,amt)`, `add_xp`, `power_up`, `get_health/conditions/stats/inventory` |
+| `veincf.actor`  | `location`, `set_location`, `set_scale`, `distance` |
+| `veincf.timer`  | `loop(ms,fn)` (return `true` to stop), `after(ms,fn)`, `cancel(handle)` |
+
+A handful of verbs compose into a real mechanic — a self-refilling brood encounter, "when a zombie dies
+two more rise," heal-on-kill, a triggered ambush. Runnable examples are in **[examples/](examples/)**
+(`death_message`, `they_multiply`) — drop a folder into `Mods/VeinCF/mods/` and launch.
 
 ## Extending it / continuing the work
 Want to bulk-add recipes, hack on the framework, or branch into new content types? Read

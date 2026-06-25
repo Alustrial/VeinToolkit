@@ -1,0 +1,11 @@
+{
+  "manifest_version": 1,
+  "id": "death_message",
+  "name": "Death Message",
+  "version": "1.0.0",
+  "author": "Alustrial",
+  "description": "Logs a message when the player dies - the simplest event-trigger example. Pure Lua, no pak, no Unreal.",
+  "requires": { "veincf": ">=0.1.0" },
+  "entrypoints": { "main": "scripts/main.lua" },
+  "tags": ["example", "scripting"]
+}

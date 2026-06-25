@@ -1,0 +1,11 @@
+{
+  "manifest_version": 1,
+  "id": "they_multiply",
+  "name": "They Multiply",
+  "version": "1.0.0",
+  "author": "Alustrial",
+  "description": "When a zombie dies, two more rise near it. Shows how a few verbs compose into a mechanic. Pure Lua, no pak.",
+  "requires": { "veincf": ">=0.1.0" },
+  "entrypoints": { "main": "scripts/main.lua" },
+  "tags": ["example", "scripting", "mechanic"]
+}
